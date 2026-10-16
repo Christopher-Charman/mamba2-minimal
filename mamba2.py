@@ -153,6 +153,35 @@ class Mamba2LMHeadModel(nn.Module):
         top_p: float = 1.0,
         eos_token_id: int = 0,
     ) -> Iterable[tuple[int, list[InferenceCache]]]:
+        # Independent pre-activation admission: do not run the model on invalid
+        # generation arguments, even when the first token is otherwise valid.
+        if isinstance(top_p, bool) or not isinstance(top_p, (int, float)) or not (0.0 < top_p <= 1.0):
+            raise ValueError("top_p must be finite and within (0, 1]")
+        if isinstance(top_k, bool) or not isinstance(top_k, int) or not (0 <= top_k <= 262144):
+            raise ValueError("top_k must be an integer in [0, 262144]")
+        declared_vocab_size = getattr(self.args, "vocab_size", None)
+        if isinstance(declared_vocab_size, int) and top_k > declared_vocab_size:
+            raise ValueError("top_k exceeds declared vocabulary size")
+        if isinstance(max_new_length, bool) or not isinstance(max_new_length, int) or not (0 <= max_new_length <= 4096):
+            raise ValueError("max_new_length must be an integer in [0, 4096]")
+        if isinstance(temperature, bool) or not isinstance(temperature, (int, float)):
+            raise ValueError("temperature must be a finite positive number")
+        try:
+            is_valid_temperature = 0.0 < float(temperature) < float("inf")
+        except (ValueError, OverflowError):
+            is_valid_temperature = False
+        if not is_valid_temperature:
+            raise ValueError("temperature must be a finite positive number")
+        if not isinstance(input_ids, torch.Tensor) or input_ids.dtype != torch.long or input_ids.ndim != 1 or input_ids.numel() == 0:
+            raise ValueError("input_ids must be a nonempty 1-D torch.long tensor")
+        if input_ids.numel() > 8192:
+            raise ValueError("prompt exceeds 8192 token admission limit")
+        if (input_ids < 0).any().item():
+            raise ValueError("prompt contains negative token IDs")
+        if isinstance(declared_vocab_size, int) and (input_ids >= declared_vocab_size).any().item():
+            raise ValueError("prompt token ID exceeds declared vocabulary")
+        if max_new_length == 0:
+            return  # Avoid needless prompt inference for a zero-step request.
         prefix, tokens = input_ids[:-1], input_ids[-1:].unsqueeze(0)
 
         # Process prompt
@@ -175,20 +204,28 @@ class Mamba2LMHeadModel(nn.Module):
             with torch.no_grad():
                 out, h = self(tokens, h)
             logits = out[0, -1]
+            if logits.ndim != 1 or logits.numel() == 0 or not torch.isfinite(logits).all().item():
+                raise ValueError("model logits must be a finite, nonempty vocabulary vector")
+            if top_k > logits.numel():
+                raise ValueError("top_k exceeds model vocabulary size")
             if temperature != 1.0:
                 logits = logits / temperature
+            if not torch.isfinite(logits).all().item():
+                raise ValueError("temperature scaling created nonfinite logits")
             if top_k > 0:
                 indices_to_remove = logits < torch.topk(logits, k=top_k)[0][-1]
                 logits[indices_to_remove] = -torch.inf
             if top_p < 1.0:
                 sorted_logits, sorted_indices = torch.sort(logits, descending=True)
                 cum_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
-                sorted_indices_to_remove = cum_probs > 0.5
+                sorted_indices_to_remove = cum_probs > top_p
                 sorted_indices_to_remove[1:] = sorted_indices_to_remove[:-1].clone()
                 sorted_indices_to_remove[0] = False
                 indices_to_remove = sorted_indices[sorted_indices_to_remove]
                 logits[indices_to_remove] = -torch.inf
             probs = F.softmax(logits, dim=-1)
+            if not torch.isfinite(probs).all().item() or not (probs.sum().item() > 0):
+                raise ValueError("sampling distribution must be finite and nonempty")
             next_token = torch.multinomial(probs, num_samples=1)
             if next_token.item() == eos_token_id:
                 return
