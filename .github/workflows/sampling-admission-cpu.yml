@@ -1,0 +1,40 @@
+name: mamba2-sampling-cpu
+
+on:
+  pull_request:
+    paths:
+      - 'mamba2.py'
+      - 'tests/test_sampling_admission.py'
+      - '.github/workflows/sampling-admission-cpu.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sampling-cpu-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sampling:
+    name: Sampling admission (CPU only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install isolated CPU-only test requirements (no cache)
+        run: |
+          python -m pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu 'torch==2.10.0+cpu'
+          python -m pip install --no-cache-dir 'einops==0.8.2'
+      - name: Verify source compilation and run all sampling tests
+        env:
+          OMP_NUM_THREADS: '2'
+          MKL_NUM_THREADS: '2'
+        run: |
+          python -m py_compile mamba2.py tests/test_sampling_admission.py
+          python -m unittest discover -s tests -p 'test_sampling_admission.py' -v
