@@ -70,6 +70,16 @@ class SamplingAdmissionTests(unittest.TestCase):
         self.assertEqual(int(torch.count_nonzero(probs[0])), 2)
         self.assertAlmostEqual(float(probs[0].sum()), 1.0)
 
+    def test_top_k_exact_cardinality_with_tied_logits(self):
+        # Regression: comparing against the kth *value* keeps all ties.
+        for k in (1, 2, 3, 4):
+            with self.subTest(top_k=k):
+                _, distributions, _ = self.observe(
+                    values=[0.0, 0.0, 0.0, 0.0], top_k=k, top_p=1.0
+                )
+                self.assertEqual(int(torch.count_nonzero(distributions[0])), k)
+                self.assertAlmostEqual(float(distributions[0].sum()), 1.0)
+
     def test_invalid_top_p_rejected_before_model(self):
         for p in (0, -0.1, 1.001, float("nan"), float("inf"), True, None, "0.8"):
             model = FakeModel(self.values)

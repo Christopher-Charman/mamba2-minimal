@@ -213,7 +213,11 @@ class Mamba2LMHeadModel(nn.Module):
             if not torch.isfinite(logits).all().item():
                 raise ValueError("temperature scaling created nonfinite logits")
             if top_k > 0:
-                indices_to_remove = logits < torch.topk(logits, k=top_k)[0][-1]
+                # Value-threshold filtering retains more than k when logits tie.
+                # Select exact token indices instead, then mask all others.
+                selected_indices = torch.topk(logits, k=top_k).indices
+                indices_to_remove = torch.ones_like(logits, dtype=torch.bool)
+                indices_to_remove.scatter_(0, selected_indices, False)
                 logits[indices_to_remove] = -torch.inf
             if top_p < 1.0:
                 sorted_logits, sorted_indices = torch.sort(logits, descending=True)
